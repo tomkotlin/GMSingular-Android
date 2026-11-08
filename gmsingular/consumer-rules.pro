@@ -1,0 +1,4 @@
+-keep class com.singular.sdk.** { *; }
+-keep public class com.android.installreferrer.** { *; }
+-keep class com.goingmerry.gmsingular.** { *; }
+-dontwarn com.singular.sdk.**
