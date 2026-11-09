@@ -1,7 +1,5 @@
 package com.goingmerry.gmsingular
 
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
@@ -55,7 +53,7 @@ class GMSingularClientTest {
           "custom_user_id": "user-1",
           "adapty_id": "user-1",
           "device_id": "device-1",
-          "singular_device_id": "sdid-1",
+          "singular_device_id": "device-1",
           "app_store_country": "US",
           "app_version": "1.2.0",
           "android_version": "14",
@@ -84,7 +82,6 @@ class GMSingularClientTest {
     @Test
     fun initializePostsRequestAndPersistsResponse() = runTest {
         val client = newClient()
-        client.recordSingularDeviceId("sdid-1")
 
         val appUser = client.initialize(
             applicationId = " app-1 ",
@@ -106,7 +103,7 @@ class GMSingularClientTest {
                 "custom_user_id" to "user-1",
                 "adapty_id" to "user-1",
                 "device_id" to "device-1",
-                "singular_device_id" to "sdid-1",
+                "singular_device_id" to "device-1",
                 "app_store_country" to "US",
                 "app_version" to "1.2.0",
                 "android_version" to "14",
@@ -118,7 +115,7 @@ class GMSingularClientTest {
         assertEquals("user-1", appUser.customUserId)
         assertTrue(store.values.containsKey(GMSingularClient.APP_USER_KEY))
         assertEquals(listOf("user-1"), userSetter.ids)
-        assertEquals("sdid-1", client.savedSingularDeviceId())
+        assertEquals("device-1", client.savedSingularDeviceId())
         assertEquals("user-1", client.savedAdaptyId())
     }
 
@@ -152,10 +149,10 @@ class GMSingularClientTest {
         store.values[GMSingularClient.APP_USER_KEY] = serverAppUser
         val client = newClient()
 
-        client.initialize(applicationId = "app-1", deviceId = "device-1", forceRefresh = true)
+        client.initialize(applicationId = "app-1", deviceId = "device-2", forceRefresh = true)
 
         assertEquals(1, network.requests.size)
-        assertEquals("sdid-1", network.lastBody()["singular_device_id"]!!.jsonPrimitive.content)
+        assertEquals("device-2", network.lastBody()["singular_device_id"]!!.jsonPrimitive.content)
     }
 
     @Test
@@ -169,38 +166,33 @@ class GMSingularClientTest {
     }
 
     @Test
-    fun waitsForSingularDeviceIdDeliveredBySdk() = runTest {
+    fun sendsDeviceIdAsSingularDeviceIdWithoutWaiting() = runTest {
         val client = newClient()
-        launch {
-            delay(2_000)
-            client.recordSingularDeviceId("sdid-late")
-        }
 
-        client.initialize(applicationId = "app-1", deviceId = "device-1")
+        client.initialize(applicationId = "app-1", deviceId = " android-id-1 ")
 
-        assertEquals("sdid-late", network.lastBody()["singular_device_id"]!!.jsonPrimitive.content)
-        assertEquals("sdid-late", store.values[GMSingularClient.SINGULAR_DEVICE_ID_KEY])
+        assertEquals(0L, testScheduler.currentTime)
+        assertEquals("android-id-1", network.lastBody()["singular_device_id"]!!.jsonPrimitive.content)
     }
 
     @Test
-    fun usesSingularDeviceIdSavedOnPreviousLaunch() = runTest {
-        store.values[GMSingularClient.SINGULAR_DEVICE_ID_KEY] = "sdid-saved"
+    fun blankSingularDeviceIdFallsBackToDeviceId() = runTest {
         val client = newClient()
 
-        client.initialize(applicationId = "app-1", deviceId = "device-1")
+        client.initialize(applicationId = "app-1", deviceId = "android-id-1", singularDeviceId = "  ")
 
-        assertEquals("sdid-saved", network.lastBody()["singular_device_id"]!!.jsonPrimitive.content)
+        assertEquals("android-id-1", network.lastBody()["singular_device_id"]!!.jsonPrimitive.content)
     }
 
     @Test
-    fun failsWhenSingularDeviceIdNeverArrives() = runTest {
+    fun blankDeviceIdWithoutSingularDeviceIdFailsBeforeAnyWork() = runTest {
         val client = newClient()
 
         val error = runCatching {
-            client.initialize(applicationId = "app-1", deviceId = "device-1", singularDeviceIdTimeoutMillis = 3_000)
+            client.initialize(applicationId = "app-1", deviceId = "  ")
         }.exceptionOrNull()
 
-        assertTrue(error is GMSingularException.MissingSingularDeviceId)
+        assertTrue(error is GMSingularException.MissingRequestData)
         assertTrue(network.requests.isEmpty())
     }
 

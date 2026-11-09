@@ -53,14 +53,9 @@ lifecycleScope.launch {
 }
 ```
 
-`singularDeviceId` is resolved automatically when you leave it `null`:
+`singular_device_id` is sent as the value you pass in `singularDeviceId`, or `deviceId` when you leave it `null` or blank.
 
-1. the value you pass in,
-2. the Singular device ID of the stored app user,
-3. the Singular device ID reported by the SDK (saved on device once received),
-4. otherwise it waits up to `singularDeviceIdTimeoutMillis` (default 10 s) for the SDK to report it, then throws `GMSingularException.MissingSingularDeviceId`.
-
-> **Important:** On Android the Singular device ID is only delivered asynchronously by the SDK after `startSingularSession`. There is no synchronous `Singular.singularID()` like on iOS.
+> **Important:** Android uses the native Android ID as its device identifier, the same way iOS uses IDFV. Singular Device ID (SDID) is not used, so nothing waits on the Singular SDK before the app user is registered.
 
 ### Important: User ID Consistency
 
@@ -164,7 +159,7 @@ In the app's `settings.gradle.kts`:
 includeBuild("../GMSingular-Android")
 ```
 ```kotlin
-implementation("com.goingmerry:gmsingular:0.1.0")
+implementation("com.goingmerry:gmsingular:0.2.0")
 ```
 
 ### Option C: Maven local
@@ -172,7 +167,7 @@ implementation("com.goingmerry:gmsingular:0.1.0")
 ```
 ./gradlew :gmsingular:publishToMavenLocal
 ```
-Then add `mavenLocal()` to the app's repositories and depend on `com.goingmerry:gmsingular:0.1.0`.
+Then add `mavenLocal()` to the app's repositories and depend on `com.goingmerry:gmsingular:0.2.0`.
 
 The library merges the `INTERNET`, `ACCESS_NETWORK_STATE` and `com.google.android.gms.permission.AD_ID` permissions and ships R8 keep rules for Singular, so no extra manifest or ProGuard setup is needed in the app.
 
@@ -187,10 +182,8 @@ The library merges the `INTERNET`, `ACCESS_NETWORK_STATE` and `com.google.androi
 | `initialize(...)` | Registers or loads the app user, then applies its `customUserId` to Singular |
 | `handleNewIntent(intent)` | Re-runs Singular with a new deep-link intent |
 | `makeSingularConfig(...)` | Returns a configured `SingularConfig` if you want to call `Singular.init` yourself |
-| `waitForSingularDeviceId(timeoutMillis)` | Suspends until the SDK reports the Singular device ID |
-| `currentSingularDeviceId()` | Singular device ID reported by the SDK, or `null` |
 | `savedCustomUserId()` | Stored custom user ID |
-| `savedSingularDeviceId()` | Stored Singular device ID |
+| `savedSingularDeviceId()` | Stored `singular_device_id` (the Android ID unless you passed another value) |
 | `savedAdaptyId()` | Stored Adapty ID |
 | `currentAppUser()` | Current `AppUserResponse`, if any |
 | `clearStoredAppUser()` | Wipes the cached and stored app user |
@@ -202,24 +195,23 @@ The library merges the `INTERNET`, `ACCESS_NETWORK_STATE` and `com.google.androi
 | `applicationId` | Your Going Merry app ID (sent as `Authorization: Bearer <id>`) |
 | `customUserId` | Your app's user identifier (should match `adaptyId`) |
 | `adaptyId` | The Adapty customer user ID (should match `customUserId`) |
-| `deviceId` | Device identifier (typically `Settings.Secure.ANDROID_ID`) |
-| `singularDeviceId` | Singular device ID (auto-resolved when `null`) |
+| `deviceId` | Device identifier (typically `Settings.Secure.ANDROID_ID`), required |
+| `singularDeviceId` | Value sent as `singular_device_id`; defaults to `deviceId` |
 | `appStoreCountry` | Store country code |
 | `appVersion` | App version name |
 | `androidVersion` | OS version (defaults to `Build.VERSION.RELEASE`), sent as `android_version` |
 | `forceRefresh` | `true` bypasses the stored user and calls the backend again |
-| `singularDeviceIdTimeoutMillis` | How long to wait for the SDK to report the Singular device ID |
 
 ### Errors
 
-`initialize` throws `GMSingularException`: `MissingRequestData`, `MissingSingularDeviceId`, `InvalidStatusCode(statusCode)`, `EncodingFailed`, `DecodingFailed`, `Storage`. Network failures surface as `IOException`.
+`initialize` throws `GMSingularException`: `MissingRequestData` (blank `applicationId`, or blank `deviceId` with no `singularDeviceId`), `InvalidStatusCode(statusCode)`, `EncodingFailed`, `DecodingFailed`, `Storage`. Network failures surface as `IOException`.
 
 ## Differences from iOS
 
 | iOS | Android |
 |-----|---------|
 | `startSingularSession` only prepares the config; `requestTrackingAuthorizationAndStartSingularSession()` starts it after ATT | No ATT on Android: `startSingularSession` starts Singular immediately |
-| `Singular.singularID()` polled for up to 3 s | Singular device ID arrives through `SDIDAccessorHandler`, is saved on device, and `initialize` waits up to 10 s |
+| `singular_device_id` is the IDFV | `singular_device_id` is the Android ID (`deviceId`); SDID is not used |
 | `userActivity` for universal links | Launch `Intent` plus `handleNewIntent` for App Links |
 | SKAdNetwork, conversion values, clipboard attribution | Not applicable on Android (attribution uses the Play Install Referrer) |
 | Keychain storage (survives reinstall) | SharedPreferences (cleared on uninstall unless restored by Android backup) |
@@ -229,4 +221,4 @@ The library merges the `INTERNET`, `ACCESS_NETWORK_STATE` and `com.google.androi
 
 - Keys are **not** hard-coded; always pass your Singular SDK key and secret from the app.
 - `initialize` returns the stored app user without calling the backend until `forceRefresh = true` or `clearStoredAppUser()` is called, the same as on iOS.
-- If your app enables Android backup, consider excluding the `com.goingmerry.gmsingular` shared preferences file so a restored device does not reuse another device's Singular device ID.
+- If your app enables Android backup, consider excluding the `com.goingmerry.gmsingular` shared preferences file so a restored device does not reuse another device's stored app user.

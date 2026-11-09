@@ -4,9 +4,6 @@ sealed class GMSingularException(message: String, cause: Throwable? = null) : Ex
 
     class MissingRequestData : GMSingularException("Missing app user request payload.")
 
-    class MissingSingularDeviceId :
-        GMSingularException("A singular_device_id is required but was not provided or discoverable.")
-
     class InvalidStatusCode(val statusCode: Int) : GMSingularException("Unexpected status code: $statusCode")
 
     class EncodingFailed(cause: Throwable? = null) :
