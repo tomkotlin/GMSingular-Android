@@ -15,6 +15,7 @@ Follow these steps in order.
 Call `startSingularSession` in your launcher Activity's `onCreate`, before `setContent`.
 Android has no App Tracking Transparency prompt, so this both configures **and starts** Singular, then fires an `app_open` event.
 It belongs in the Activity (not `Application.onCreate`) because Singular reads the launch `Intent` for deep links.
+With `customerUserId = null`, the custom user ID saved from an earlier `initialize()` is used, so every launch after the first one starts Singular with it.
 
 ```kotlin
 class MainActivity : ComponentActivity() {
@@ -25,7 +26,7 @@ class MainActivity : ComponentActivity() {
             singularApiKey = BuildConfig.SINGULAR_SDK_KEY,
             singularSecret = BuildConfig.SINGULAR_SDK_SECRET,
             intent = intent,
-            customerUserId = currentUserId,
+            customerUserId = null,
             enableLogging = BuildConfig.DEBUG,
         )
 
@@ -41,42 +42,42 @@ After Singular has started, call `initialize()` from a coroutine to register or 
 ```kotlin
 lifecycleScope.launch {
     runCatching {
-        GMSingularClient.shared(this@MainActivity).initialize(
+        val appUser = GMSingularClient.shared(this@MainActivity).initialize(
             applicationId = BuildConfig.GM_APPLICATION_ID,
-            customUserId = currentUserId,
-            adaptyId = currentUserId,
-            deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID),
             appStoreCountry = Locale.getDefault().country,
             appVersion = BuildConfig.VERSION_NAME,
         )
+        Adapty.identify(appUser.customUserId) { }
     }
 }
 ```
 
-`singular_device_id` is sent as the value you pass in `singularDeviceId`, or `deviceId` when you leave it `null` or blank.
+On the first launch no `custom_user_id` is sent, so the backend generates one. The library saves the returned user and sets its `customUserId` on Singular. Later launches return the saved user without calling the backend.
 
-> **Important:** Android uses the native Android ID as its device identifier, the same way iOS uses IDFV. Singular Device ID (SDID) is not used, so nothing waits on the Singular SDK before the app user is registered.
+Device identifiers sent to the backend:
+
+| Field | Value |
+|-------|-------|
+| `device_id` | `deviceId` if you pass one, otherwise the App Set ID |
+| `singular_device_id` | `singularDeviceId` if you pass one, otherwise the same value as `device_id` |
+| `advertising_id` | `advertisingId` if you pass one, otherwise the Google Advertising ID (GAID). Left out when the user opted out of ad personalization or the ID is all zeros |
+
+> **Important:** Android ID is not read or sent, and Singular Device ID (SDID) is not used.
 
 ### Important: User ID Consistency
 
-The `customUserId` passed to Singular and the Adapty customer user ID (`adaptyId`) **must be the same value** so Going Merry can correlate Singular attribution with Adapty subscription events.
+Singular's custom user ID and the Adapty customer user ID **must be the same value** so Going Merry can correlate Singular attribution with Adapty subscription events.
+Use the backend-generated `customUserId` for both. `savedCustomUserId()` is not a suspend function, so it can be read in `Application.onCreate` to activate Adapty with the saved ID; it returns `null` until the first `initialize()` succeeds.
 
 ```kotlin
-val userId = "user_12345"
-
-GMSingularClient.shared(this).startSingularSession(
-    singularApiKey = "...",
-    singularSecret = "...",
-    intent = intent,
-    customerUserId = userId,
-)
-
-GMSingularClient.shared(this).initialize(
-    applicationId = "...",
-    customUserId = userId,
-    adaptyId = userId,
-    deviceId = "...",
-)
+class App : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        val savedId = GMSingularClient.shared(this).savedCustomUserId()
+        val builder = AdaptyConfig.Builder("...")
+        Adapty.activate(this, savedId?.let { builder.withCustomerUserId(it).build() } ?: builder.build())
+    }
+}
 ```
 
 ### Deep links (optional)
@@ -89,7 +90,7 @@ GMSingularClient.shared(this).startSingularSession(
     singularApiKey = "...",
     singularSecret = "...",
     intent = intent,
-    customerUserId = userId,
+    customerUserId = null,
     brandedDomains = listOf("xxx.sng.link"),
     singularLinksHandler = { params ->
         val deeplink = params.deeplink
@@ -159,7 +160,7 @@ In the app's `settings.gradle.kts`:
 includeBuild("../GMSingular-Android")
 ```
 ```kotlin
-implementation("com.goingmerry:gmsingular:0.2.0")
+implementation("com.goingmerry:gmsingular:0.3.0")
 ```
 
 ### Option C: Maven local
@@ -167,9 +168,10 @@ implementation("com.goingmerry:gmsingular:0.2.0")
 ```
 ./gradlew :gmsingular:publishToMavenLocal
 ```
-Then add `mavenLocal()` to the app's repositories and depend on `com.goingmerry:gmsingular:0.2.0`.
+Then add `mavenLocal()` to the app's repositories and depend on `com.goingmerry:gmsingular:0.3.0`.
 
 The library merges the `INTERNET`, `ACCESS_NETWORK_STATE` and `com.google.android.gms.permission.AD_ID` permissions and ships R8 keep rules for Singular, so no extra manifest or ProGuard setup is needed in the app.
+It reads the App Set ID (`play-services-appset`) and the GAID (`play-services-ads-identifier`), so the app's Play Console listing must declare Advertising ID use and list it in the Data safety form.
 
 ## API Reference
 
@@ -182,9 +184,9 @@ The library merges the `INTERNET`, `ACCESS_NETWORK_STATE` and `com.google.androi
 | `initialize(...)` | Registers or loads the app user, then applies its `customUserId` to Singular |
 | `handleNewIntent(intent)` | Re-runs Singular with a new deep-link intent |
 | `makeSingularConfig(...)` | Returns a configured `SingularConfig` if you want to call `Singular.init` yourself |
-| `savedCustomUserId()` | Stored custom user ID |
-| `savedSingularDeviceId()` | Stored `singular_device_id` (the Android ID unless you passed another value) |
-| `savedAdaptyId()` | Stored Adapty ID |
+| `savedCustomUserId()` | Stored custom user ID, or `null` before the first successful `initialize()`. Not a suspend function |
+| `savedSingularDeviceId()` | Stored `singular_device_id`. Not a suspend function |
+| `savedAdaptyId()` | Stored Adapty ID. Not a suspend function |
 | `currentAppUser()` | Current `AppUserResponse`, if any |
 | `clearStoredAppUser()` | Wipes the cached and stored app user |
 
@@ -193,10 +195,11 @@ The library merges the `INTERNET`, `ACCESS_NETWORK_STATE` and `com.google.androi
 | Parameter | Description |
 |-----------|-------------|
 | `applicationId` | Your Going Merry app ID (sent as `Authorization: Bearer <id>`) |
-| `customUserId` | Your app's user identifier (should match `adaptyId`) |
-| `adaptyId` | The Adapty customer user ID (should match `customUserId`) |
-| `deviceId` | Device identifier (typically `Settings.Secure.ANDROID_ID`), required |
-| `singularDeviceId` | Value sent as `singular_device_id`; defaults to `deviceId` |
+| `customUserId` | Optional. Leave `null` to let the backend generate one |
+| `adaptyId` | Optional Adapty customer user ID |
+| `deviceId` | Optional. Defaults to the App Set ID |
+| `singularDeviceId` | Value sent as `singular_device_id`; defaults to the resolved `device_id` |
+| `advertisingId` | Optional. Defaults to the GAID when available |
 | `appStoreCountry` | Store country code |
 | `appVersion` | App version name |
 | `androidVersion` | OS version (defaults to `Build.VERSION.RELEASE`), sent as `android_version` |
@@ -204,14 +207,14 @@ The library merges the `INTERNET`, `ACCESS_NETWORK_STATE` and `com.google.androi
 
 ### Errors
 
-`initialize` throws `GMSingularException`: `MissingRequestData` (blank `applicationId`, or blank `deviceId` with no `singularDeviceId`), `InvalidStatusCode(statusCode)`, `EncodingFailed`, `DecodingFailed`, `Storage`. Network failures surface as `IOException`.
+`initialize` throws `GMSingularException`: `MissingRequestData` (blank `applicationId`, or no `deviceId` given and the App Set ID is unavailable), `InvalidStatusCode(statusCode)`, `EncodingFailed`, `DecodingFailed`, `Storage`. Network failures surface as `IOException`.
 
 ## Differences from iOS
 
 | iOS | Android |
 |-----|---------|
 | `startSingularSession` only prepares the config; `requestTrackingAuthorizationAndStartSingularSession()` starts it after ATT | No ATT on Android: `startSingularSession` starts Singular immediately |
-| `singular_device_id` is the IDFV | `singular_device_id` is the Android ID (`deviceId`); SDID is not used |
+| `singular_device_id` is the IDFV | `device_id` and `singular_device_id` are the App Set ID, plus `advertising_id` (GAID) when available; SDID and Android ID are not used |
 | `userActivity` for universal links | Launch `Intent` plus `handleNewIntent` for App Links |
 | SKAdNetwork, conversion values, clipboard attribution | Not applicable on Android (attribution uses the Play Install Referrer) |
 | Keychain storage (survives reinstall) | SharedPreferences (cleared on uninstall unless restored by Android backup) |

@@ -24,6 +24,7 @@ class GMSingularClient internal constructor(
     private val store: KeyValueStore,
     private val network: NetworkClient,
     private val singularUserSetter: SingularUserSetting,
+    private val identifiers: DeviceIdentifierProvider,
     private val ioDispatcher: CoroutineDispatcher,
     private val osVersionProvider: () -> String?,
 ) {
@@ -36,6 +37,7 @@ class GMSingularClient internal constructor(
         network: NetworkClient = HttpUrlConnectionNetworkClient(),
         singularUserSetter: SingularUserSetting = LiveSingularUserSetter(),
         store: KeyValueStore? = null,
+        identifiers: DeviceIdentifierProvider? = null,
     ) : this(
         appContext = context.applicationContext,
         baseUrl = baseUrl,
@@ -43,6 +45,7 @@ class GMSingularClient internal constructor(
         store = store ?: SharedPreferencesKeyValueStore(context.applicationContext, storeName),
         network = network,
         singularUserSetter = singularUserSetter,
+        identifiers = identifiers ?: PlayServicesDeviceIdentifierProvider(context.applicationContext),
         ioDispatcher = Dispatchers.IO,
         osVersionProvider = { Build.VERSION.RELEASE },
     )
@@ -135,8 +138,9 @@ class GMSingularClient internal constructor(
         applicationId: String,
         customUserId: String? = null,
         adaptyId: String? = null,
-        deviceId: String,
+        deviceId: String? = null,
         singularDeviceId: String? = null,
+        advertisingId: String? = null,
         appStoreCountry: String? = null,
         appVersion: String? = null,
         androidVersion: String? = null,
@@ -144,9 +148,6 @@ class GMSingularClient internal constructor(
     ): AppUserResponse = initializeMutex.withLock {
         val trimmedApplicationId = applicationId.trim()
         if (trimmedApplicationId.isEmpty()) throw GMSingularException.MissingRequestData()
-        val resolvedSingularDeviceId = singularDeviceId?.trim()?.takeIf { it.isNotEmpty() }
-            ?: deviceId.trim().takeIf { it.isNotEmpty() }
-            ?: throw GMSingularException.MissingRequestData()
 
         if (!forceRefresh) {
             val stored = try {
@@ -160,11 +161,20 @@ class GMSingularClient internal constructor(
             }
         }
 
+        val resolvedDeviceId = deviceId.nonBlank()
+            ?: withContext(ioDispatcher) { identifiers.appSetId() }.nonBlank()
+            ?: throw GMSingularException.MissingRequestData()
+        val resolvedSingularDeviceId = singularDeviceId.nonBlank() ?: resolvedDeviceId
+        val resolvedAdvertisingId = usableAdvertisingId(
+            advertisingId.nonBlank() ?: withContext(ioDispatcher) { identifiers.advertisingId() }
+        )
+
         val request = CreateAppUserRequest(
-            customUserId = customUserId,
-            adaptyId = adaptyId,
-            deviceId = deviceId,
+            customUserId = customUserId.nonBlank(),
+            adaptyId = adaptyId.nonBlank(),
+            deviceId = resolvedDeviceId,
             singularDeviceId = resolvedSingularDeviceId,
+            advertisingId = resolvedAdvertisingId,
             appStoreCountry = appStoreCountry,
             appVersion = appVersion,
             androidVersion = androidVersion ?: osVersionProvider(),
@@ -190,11 +200,11 @@ class GMSingularClient internal constructor(
         }
     }
 
-    suspend fun savedCustomUserId(): String? = currentAppUser()?.customUserId
+    fun savedCustomUserId(): String? = peekStoredAppUser()?.customUserId.nonBlank()
 
-    suspend fun savedSingularDeviceId(): String? = currentAppUser()?.singularDeviceId
+    fun savedSingularDeviceId(): String? = peekStoredAppUser()?.singularDeviceId.nonBlank()
 
-    suspend fun savedAdaptyId(): String? = currentAppUser()?.adaptyId
+    fun savedAdaptyId(): String? = peekStoredAppUser()?.adaptyId.nonBlank()
 
     private fun buildSingularConfig(settings: SessionSettings, intent: Intent?): SingularConfig? {
         if (settings.apiKey.isEmpty() || settings.secret.isEmpty()) return null
@@ -223,15 +233,24 @@ class GMSingularClient internal constructor(
         return config
     }
 
-    private fun resolveCustomerUserId(customerUserId: String?): String? {
-        customerUserId?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
-        val known = cachedAppUser ?: try {
+    private fun resolveCustomerUserId(customerUserId: String?): String? =
+        customerUserId.nonBlank() ?: savedCustomUserId()
+
+    private fun peekStoredAppUser(): AppUserResponse? {
+        cachedAppUser?.let { return it }
+        val stored = try {
             readStoredAppUser()
         } catch (_: GMSingularException) {
             null
-        }
-        return known?.customUserId?.trim()?.takeIf { it.isNotEmpty() }
+        } ?: return null
+        cachedAppUser = stored
+        return stored
     }
+
+    private fun usableAdvertisingId(raw: String?): String? =
+        raw.nonBlank()?.takeUnless { id -> id.all { it == '0' || it == '-' } }
+
+    private fun String?.nonBlank(): String? = this?.trim()?.takeIf { it.isNotEmpty() }
 
     private suspend fun createAppUser(applicationId: String, request: CreateAppUserRequest): AppUserResponse {
         val body = try {

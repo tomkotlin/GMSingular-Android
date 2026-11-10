@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -47,6 +48,23 @@ class GMSingularClientTest {
         }
     }
 
+    private class FakeIdentifiers(
+        var appSetId: String? = "appset-1",
+        var advertisingId: String? = null,
+    ) : DeviceIdentifierProvider {
+        var lookups = 0
+
+        override suspend fun appSetId(): String? {
+            lookups++
+            return appSetId
+        }
+
+        override suspend fun advertisingId(): String? {
+            lookups++
+            return advertisingId
+        }
+    }
+
     private val serverAppUser = """
         {
           "application_id": "app-1",
@@ -65,6 +83,7 @@ class GMSingularClientTest {
     private val network = FakeNetwork(NetworkResponse(201, serverAppUser))
     private val store = InMemoryStore()
     private val userSetter = RecordingUserSetter()
+    private val identifiers = FakeIdentifiers()
 
     private fun TestScope.newClient() = GMSingularClient(
         appContext = null,
@@ -73,6 +92,7 @@ class GMSingularClientTest {
         store = store,
         network = network,
         singularUserSetter = userSetter,
+        identifiers = identifiers,
         ioDispatcher = StandardTestDispatcher(testScheduler),
         osVersionProvider = { "14" },
     )
@@ -185,15 +205,122 @@ class GMSingularClientTest {
     }
 
     @Test
-    fun blankDeviceIdWithoutSingularDeviceIdFailsBeforeAnyWork() = runTest {
+    fun usesAppSetIdForBothDeviceFieldsWhenNoDeviceIdIsGiven() = runTest {
+        val client = newClient()
+
+        client.initialize(applicationId = "app-1")
+
+        val body = network.lastBody()
+        assertEquals("appset-1", body["device_id"]!!.jsonPrimitive.content)
+        assertEquals("appset-1", body["singular_device_id"]!!.jsonPrimitive.content)
+        assertFalse(body.containsKey("custom_user_id"))
+        assertFalse(body.containsKey("adapty_id"))
+    }
+
+    @Test
+    fun blankDeviceIdFallsBackToAppSetId() = runTest {
+        val client = newClient()
+
+        client.initialize(applicationId = "app-1", deviceId = "  ", customUserId = " ")
+
+        val body = network.lastBody()
+        assertEquals("appset-1", body["device_id"]!!.jsonPrimitive.content)
+        assertFalse(body.containsKey("custom_user_id"))
+    }
+
+    @Test
+    fun missingDeviceIdAndAppSetIdFailsWithoutCallingBackend() = runTest {
+        identifiers.appSetId = null
         val client = newClient()
 
         val error = runCatching {
-            client.initialize(applicationId = "app-1", deviceId = "  ")
+            client.initialize(applicationId = "app-1")
         }.exceptionOrNull()
 
         assertTrue(error is GMSingularException.MissingRequestData)
         assertTrue(network.requests.isEmpty())
+    }
+
+    @Test
+    fun sendsAdvertisingIdWhenAvailable() = runTest {
+        identifiers.advertisingId = "38400000-8cf0-11bd-b23e-10b96e40000d"
+        val client = newClient()
+
+        client.initialize(applicationId = "app-1")
+
+        assertEquals(
+            "38400000-8cf0-11bd-b23e-10b96e40000d",
+            network.lastBody()["advertising_id"]!!.jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun omitsAdvertisingIdWhenUnavailable() = runTest {
+        identifiers.advertisingId = null
+        val client = newClient()
+
+        client.initialize(applicationId = "app-1")
+
+        assertFalse(network.lastBody().containsKey("advertising_id"))
+    }
+
+    @Test
+    fun omitsZeroedAdvertisingId() = runTest {
+        identifiers.advertisingId = "00000000-0000-0000-0000-000000000000"
+        val client = newClient()
+
+        client.initialize(applicationId = "app-1")
+
+        assertFalse(network.lastBody().containsKey("advertising_id"))
+    }
+
+    @Test
+    fun passedAdvertisingIdWinsOverLookup() = runTest {
+        identifiers.advertisingId = "looked-up"
+        val client = newClient()
+
+        client.initialize(applicationId = "app-1", advertisingId = "given")
+
+        assertEquals("given", network.lastBody()["advertising_id"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun storedAppUserSkipsIdentifierLookups() = runTest {
+        store.values[GMSingularClient.APP_USER_KEY] = serverAppUser
+        val client = newClient()
+
+        client.initialize(applicationId = "app-1")
+
+        assertEquals(0, identifiers.lookups)
+        assertTrue(network.requests.isEmpty())
+    }
+
+    @Test
+    fun savedCustomUserIdIsReadableWithoutCoroutine() {
+        store.values[GMSingularClient.APP_USER_KEY] = serverAppUser
+        val client = TestScope().newClient()
+
+        assertEquals("user-1", client.savedCustomUserId())
+        assertEquals("device-1", client.savedSingularDeviceId())
+        assertEquals("user-1", client.savedAdaptyId())
+    }
+
+    @Test
+    fun savedCustomUserIdIsNullBeforeFirstInitialize() {
+        val client = TestScope().newClient()
+
+        assertNull(client.savedCustomUserId())
+    }
+
+    @Test
+    fun backendGeneratedCustomUserIdIsAppliedToSingularAndSaved() = runTest {
+        val client = newClient()
+
+        val appUser = client.initialize(applicationId = "app-1")
+
+        assertEquals("user-1", appUser.customUserId)
+        assertEquals(listOf("user-1"), userSetter.ids)
+        assertEquals("user-1", client.savedCustomUserId())
     }
 
     @Test
