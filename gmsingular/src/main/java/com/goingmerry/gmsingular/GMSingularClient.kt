@@ -16,6 +16,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import java.util.UUID
 
 class GMSingularClient internal constructor(
     private val appContext: Context?,
@@ -27,6 +28,7 @@ class GMSingularClient internal constructor(
     private val identifiers: DeviceIdentifierProvider,
     private val ioDispatcher: CoroutineDispatcher,
     private val osVersionProvider: () -> String?,
+    private val customUserIdGenerator: () -> String,
 ) {
 
     constructor(
@@ -48,6 +50,7 @@ class GMSingularClient internal constructor(
         identifiers = identifiers ?: PlayServicesDeviceIdentifierProvider(context.applicationContext),
         ioDispatcher = Dispatchers.IO,
         osVersionProvider = { Build.VERSION.RELEASE },
+        customUserIdGenerator = { UUID.randomUUID().toString() },
     )
 
     @OptIn(ExperimentalSerializationApi::class)
@@ -61,6 +64,11 @@ class GMSingularClient internal constructor(
 
     @Volatile
     private var cachedAppUser: AppUserResponse? = null
+
+    @Volatile
+    private var cachedCustomUserId: String? = null
+
+    private val customUserIdLock = Any()
 
     @Volatile
     private var sessionSettings: SessionSettings? = null
@@ -156,11 +164,12 @@ class GMSingularClient internal constructor(
                 null
             }
             if (stored != null) {
-                applySingularCustomUserId(stored.customUserId)
+                applySingularCustomUserId(stored.customUserId.nonBlank() ?: getOrCreateCustomUserId())
                 return@withLock stored
             }
         }
 
+        val resolvedCustomUserId = customUserId.nonBlank() ?: getOrCreateCustomUserId()
         val resolvedDeviceId = deviceId.nonBlank()
             ?: withContext(ioDispatcher) { identifiers.appSetId() }.nonBlank()
             ?: throw GMSingularException.MissingRequestData()
@@ -170,8 +179,8 @@ class GMSingularClient internal constructor(
         )
 
         val request = CreateAppUserRequest(
-            customUserId = customUserId.nonBlank(),
-            adaptyId = adaptyId.nonBlank(),
+            customUserId = resolvedCustomUserId,
+            adaptyId = adaptyId.nonBlank() ?: resolvedCustomUserId,
             deviceId = resolvedDeviceId,
             singularDeviceId = resolvedSingularDeviceId,
             advertisingId = resolvedAdvertisingId,
@@ -183,8 +192,21 @@ class GMSingularClient internal constructor(
         val appUser = createAppUser(trimmedApplicationId, request)
         persist(appUser)
         cachedAppUser = appUser
-        applySingularCustomUserId(appUser.customUserId)
+        applySingularCustomUserId(appUser.customUserId.nonBlank() ?: resolvedCustomUserId)
         appUser
+    }
+
+    fun getOrCreateCustomUserId(): String {
+        cachedCustomUserId?.let { return it }
+        return synchronized(customUserIdLock) {
+            cachedCustomUserId ?: (readStoredCustomUserId()
+                ?: peekStoredAppUser()?.customUserId.nonBlank()
+                ?: customUserIdGenerator()
+            ).also { id ->
+                writeStoredCustomUserId(id)
+                cachedCustomUserId = id
+            }
+        }
     }
 
     suspend fun currentAppUser(): AppUserResponse? = loadStoredAppUser()
@@ -200,7 +222,8 @@ class GMSingularClient internal constructor(
         }
     }
 
-    fun savedCustomUserId(): String? = peekStoredAppUser()?.customUserId.nonBlank()
+    fun savedCustomUserId(): String? =
+        cachedCustomUserId ?: readStoredCustomUserId() ?: peekStoredAppUser()?.customUserId.nonBlank()
 
     fun savedSingularDeviceId(): String? = peekStoredAppUser()?.singularDeviceId.nonBlank()
 
@@ -215,7 +238,7 @@ class GMSingularClient internal constructor(
             config.withLoggingEnabled()
         }
 
-        resolveCustomerUserId(settings.customerUserId)?.let { config.withCustomUserId(it) }
+        config.withCustomUserId(resolveCustomerUserId(settings.customerUserId))
 
         settings.brandedDomains?.takeIf { it.isNotEmpty() }?.let { config.withBrandedDomains(it) }
 
@@ -233,8 +256,21 @@ class GMSingularClient internal constructor(
         return config
     }
 
-    private fun resolveCustomerUserId(customerUserId: String?): String? =
-        customerUserId.nonBlank() ?: savedCustomUserId()
+    private fun resolveCustomerUserId(customerUserId: String?): String =
+        customerUserId.nonBlank() ?: getOrCreateCustomUserId()
+
+    private fun readStoredCustomUserId(): String? = try {
+        store.getString(CUSTOM_USER_ID_KEY).nonBlank()
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun writeStoredCustomUserId(id: String) {
+        try {
+            store.putString(CUSTOM_USER_ID_KEY, id)
+        } catch (_: Exception) {
+        }
+    }
 
     private fun peekStoredAppUser(): AppUserResponse? {
         cachedAppUser?.let { return it }
@@ -336,6 +372,7 @@ class GMSingularClient internal constructor(
         const val APP_OPEN_EVENT = "app_open"
 
         internal const val APP_USER_KEY = "gm.singular.app_user"
+        internal const val CUSTOM_USER_ID_KEY = "gm.singular.custom_user_id"
 
         @Volatile
         private var instance: GMSingularClient? = null

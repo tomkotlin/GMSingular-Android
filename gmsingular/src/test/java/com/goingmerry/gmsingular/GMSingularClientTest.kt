@@ -80,10 +80,24 @@ class GMSingularClientTest {
         }
     """.trimIndent()
 
+    private val liveBackendResponse = """
+        {
+          "id": 5586695,
+          "application_id": "app-1",
+          "device_id": "appset-1",
+          "singular_device_id": "appset-1",
+          "app_store_country": "US",
+          "app_version": "1.2.1",
+          "created_at": "2026-11-10T02:18:24.411985Z",
+          "updated_at": "2026-11-10T02:21:14.735886Z"
+        }
+    """.trimIndent()
+
     private val network = FakeNetwork(NetworkResponse(201, serverAppUser))
     private val store = InMemoryStore()
     private val userSetter = RecordingUserSetter()
     private val identifiers = FakeIdentifiers()
+    private var generatedIds = 0
 
     private fun TestScope.newClient() = GMSingularClient(
         appContext = null,
@@ -95,6 +109,7 @@ class GMSingularClientTest {
         identifiers = identifiers,
         ioDispatcher = StandardTestDispatcher(testScheduler),
         osVersionProvider = { "14" },
+        customUserIdGenerator = { "generated-${++generatedIds}" },
     )
 
     private fun FakeNetwork.lastBody(): JsonObject = Json.parseToJsonElement(requests.last().body).jsonObject
@@ -146,7 +161,7 @@ class GMSingularClientTest {
         client.initialize(applicationId = "app-1", deviceId = "device-1", singularDeviceId = "sdid-given")
 
         assertEquals(
-            setOf("device_id", "singular_device_id", "android_version"),
+            setOf("custom_user_id", "adapty_id", "device_id", "singular_device_id", "android_version"),
             network.lastBody().keys,
         )
         assertEquals("sdid-given", network.lastBody()["singular_device_id"]!!.jsonPrimitive.content)
@@ -213,19 +228,73 @@ class GMSingularClientTest {
         val body = network.lastBody()
         assertEquals("appset-1", body["device_id"]!!.jsonPrimitive.content)
         assertEquals("appset-1", body["singular_device_id"]!!.jsonPrimitive.content)
-        assertFalse(body.containsKey("custom_user_id"))
-        assertFalse(body.containsKey("adapty_id"))
     }
 
     @Test
-    fun blankDeviceIdFallsBackToAppSetId() = runTest {
+    fun blankDeviceIdAndCustomUserIdFallBackToAppSetIdAndGeneratedId() = runTest {
         val client = newClient()
 
         client.initialize(applicationId = "app-1", deviceId = "  ", customUserId = " ")
 
         val body = network.lastBody()
         assertEquals("appset-1", body["device_id"]!!.jsonPrimitive.content)
-        assertFalse(body.containsKey("custom_user_id"))
+        assertEquals("generated-1", body["custom_user_id"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun generatedCustomUserIdIsSentAsCustomAndAdaptyId() = runTest {
+        val client = newClient()
+
+        client.initialize(applicationId = "app-1")
+
+        val body = network.lastBody()
+        assertEquals("generated-1", body["custom_user_id"]!!.jsonPrimitive.content)
+        assertEquals("generated-1", body["adapty_id"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun generatedCustomUserIdIsCreatedOnceAndSurvivesNewClients() {
+        val first = TestScope().newClient().getOrCreateCustomUserId()
+        val second = TestScope().newClient().getOrCreateCustomUserId()
+
+        assertEquals("generated-1", first)
+        assertEquals(first, second)
+        assertEquals(1, generatedIds)
+        assertEquals(first, store.values[GMSingularClient.CUSTOM_USER_ID_KEY])
+    }
+
+    @Test
+    fun customUserIdFromStoredAppUserIsKeptInsteadOfGeneratingOne() {
+        store.values[GMSingularClient.APP_USER_KEY] = serverAppUser
+        val client = TestScope().newClient()
+
+        assertEquals("user-1", client.getOrCreateCustomUserId())
+        assertEquals(0, generatedIds)
+    }
+
+    @Test
+    fun liveBackendResponseWithoutCustomUserIdIsAcceptedAndGeneratedIdIsApplied() = runTest {
+        network.response = NetworkResponse(201, liveBackendResponse)
+        val client = newClient()
+
+        val appUser = client.initialize(applicationId = "app-1")
+
+        assertNull(appUser.customUserId)
+        assertEquals("appset-1", appUser.singularDeviceId)
+        assertEquals(listOf("generated-1"), userSetter.ids)
+        assertEquals("generated-1", client.savedCustomUserId())
+    }
+
+    @Test
+    fun storedResponseWithoutCustomUserIdAppliesGeneratedIdOnLaterLaunch() = runTest {
+        network.response = NetworkResponse(201, liveBackendResponse)
+        newClient().initialize(applicationId = "app-1")
+        userSetter.ids.clear()
+
+        newClient().initialize(applicationId = "app-1")
+
+        assertEquals(1, network.requests.size)
+        assertEquals(listOf("generated-1"), userSetter.ids)
     }
 
     @Test
@@ -310,17 +379,6 @@ class GMSingularClientTest {
         val client = TestScope().newClient()
 
         assertNull(client.savedCustomUserId())
-    }
-
-    @Test
-    fun backendGeneratedCustomUserIdIsAppliedToSingularAndSaved() = runTest {
-        val client = newClient()
-
-        val appUser = client.initialize(applicationId = "app-1")
-
-        assertEquals("user-1", appUser.customUserId)
-        assertEquals(listOf("user-1"), userSetter.ids)
-        assertEquals("user-1", client.savedCustomUserId())
     }
 
     @Test

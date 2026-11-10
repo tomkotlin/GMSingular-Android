@@ -18,7 +18,7 @@ data class CreateAppUserRequest(
 @Serializable
 data class AppUserResponse(
     @SerialName("application_id") val applicationId: String,
-    @SerialName("custom_user_id") val customUserId: String,
+    @SerialName("custom_user_id") val customUserId: String? = null,
     @SerialName("adapty_id") val adaptyId: String? = null,
     @SerialName("device_id") val deviceId: String,
     @SerialName("singular_device_id") val singularDeviceId: String,
